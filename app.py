@@ -9,7 +9,6 @@ st.set_page_config(
 )
 
 st.title("🎬 Painel de Controle de Roteiros")
-st.write("Conectando ao Notion para buscar suas bases de dados...")
 
 # --- Conexão Segura com o Notion ---
 try:
@@ -19,25 +18,44 @@ try:
 
     # Inicializa a conexão
     notion = Client(auth=notion_token)
+    
+    st.info("Conectando ao Notion para buscar suas bases de dados...")
 
-    # Busca o conteúdo da página do projeto
-    response = notion.blocks.children.list(block_id=page_id)
+    # --- Nossa nova função "Exploradora" ---
+    def encontrar_tabelas(bloco_id):
+        lista_de_tabelas = []
+        try:
+            # Pega os filhos do bloco atual (seja a página principal ou uma sub-página)
+            resposta = notion.blocks.children.list(block_id=bloco_id)
+            for bloco in resposta["results"]:
+                # Se o bloco for uma tabela, adiciona à nossa lista
+                if bloco["type"] == "child_database":
+                    lista_de_tabelas.append(bloco["child_database"]["title"])
+                # Se o bloco for uma sub-página, chama a função novamente para olhar dentro dela
+                elif bloco["type"] == "child_page":
+                    # Pega as tabelas encontradas na sub-página e adiciona à nossa lista principal
+                    tabelas_na_subpagina = encontrar_tabelas(bloco["id"])
+                    lista_de_tabelas.extend(tabelas_na_subpagina)
+        except Exception as e:
+            st.warning(f"Não foi possível ler o conteúdo de uma sub-página. Erro: {e}")
+        
+        return lista_de_tabelas
 
-    st.success("✅ Conexão com o Notion bem-sucedida!")
+    # --- Execução Principal ---
+    # Começa a busca a partir da página principal do projeto
+    todas_as_tabelas = encontrar_tabelas(page_id)
 
-    st.subheader("Bases de Dados Encontradas neste Projeto:")
+    st.success("✅ Busca concluída!")
 
-    # Procura por tabelas (databases) e as exibe na tela
-    tabelas_encontradas = False
-    for block in response["results"]:
-        if block["type"] == "child_database":
-            tabelas_encontradas = True
-            st.write(f"- {block['child_database']['title']}")
+    st.subheader("Todas as Bases de Dados Encontradas no Projeto:")
 
-    if not tabelas_encontradas:
-        st.warning("Nenhuma tabela foi encontrada diretamente nesta página.")
+    if todas_as_tabelas:
+        for nome_tabela in todas_as_tabelas:
+            st.write(f"- {nome_tabela}")
+    else:
+        st.warning("Nenhuma tabela foi encontrada no projeto, nem mesmo em sub-páginas.")
 
 except Exception as e:
-    st.error(f"❌ Ocorreu um erro ao conectar com o Notion.")
+    st.error(f"❌ Ocorreu um erro geral ao conectar com o Notion.")
     st.error(f"Detalhes do erro: {e}")
-    st.info("Dicas: Verifique se seus segredos (NOTION_TOKEN e PAGE_ID) estão corretos nas configurações do app no Streamlit Cloud e se você conectou a integração a esta página no Notion.")
+    st.info("Dicas: Verifique se seus segredos (NOTION_TOKEN e PAGE_ID) estão corretos.")
