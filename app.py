@@ -1,61 +1,104 @@
 import streamlit as st
 from notion_client import Client
+import google.generativeai as genai
 
 # --- Configuração da Página ---
-st.set_page_config(
-    page_title="Painel de Roteiros",
-    page_icon="🎬",
-    layout="wide"
-)
+st.set_page_config(page_title="Painel de Roteiros", page_icon="🎬", layout="wide")
+st.title("🤖 Assistente de World-Building")
 
-st.title("🎬 Painel de Controle de Roteiros")
+# --- Funções do Backend ---
 
-# --- Conexão Segura com o Notion ---
-try:
-    # Acessa os segredos guardados no Streamlit Cloud
-    notion_token = st.secrets["NOTION_TOKEN"]
+# Função para inicializar as conexões com as APIs de forma segura
+def inicializar_conexoes():
+    try:
+        notion = Client(auth=st.secrets["NOTION_TOKEN"])
+        genai.configure(api_key=st.secrets["GOOGLE_AI_KEY"])
+        model = genai.GenerativeModel('gemini-2.5-flash-lite')
+        return notion, model
+    except Exception as e:
+        st.error(f"Erro ao inicializar as conexões. Verifique seus segredos. Detalhes: {e}")
+        return None, None
+
+# Função para encontrar todas as tabelas (já a tínhamos)
+def encontrar_tabelas(notion_client, bloco_id):
+    tabelas = {}
+    try:
+        resposta = notion_client.blocks.children.list(block_id=bloco_id)
+        for bloco in resposta["results"]:
+            if bloco["type"] == "child_database":
+                tabelas[bloco["child_database"]["title"]] = bloco["id"]
+            elif bloco["type"] == "child_page":
+                tabelas.update(encontrar_tabelas(notion_client, bloco["id"]))
+    except Exception as e:
+        st.warning(f"Não foi possível ler uma sub-página. Erro: {e}")
+    return tabelas
+
+# --- Início da Interface do App ---
+
+# Inicializa as conexões
+notion, model = inicializar_conexoes()
+
+if notion and model:
+    # Pega o ID da página principal dos segredos
     page_id = st.secrets["PAGE_ID"]
 
-    # Inicializa a conexão
-    notion = Client(auth=notion_token)
-    
-    st.info("Conectando ao Notion para buscar suas bases de dados...")
+    # Encontra todas as tabelas e as coloca em um menu
+    lista_de_tabelas = encontrar_tabelas(notion, page_id)
 
-    # --- Nossa nova função "Exploradora" ---
-    def encontrar_tabelas(bloco_id):
-        lista_de_tabelas = []
-        try:
-            # Pega os filhos do bloco atual (seja a página principal ou uma sub-página)
-            resposta = notion.blocks.children.list(block_id=bloco_id)
-            for bloco in resposta["results"]:
-                # Se o bloco for uma tabela, adiciona à nossa lista
-                if bloco["type"] == "child_database":
-                    lista_de_tabelas.append(bloco["child_database"]["title"])
-                # Se o bloco for uma sub-página, chama a função novamente para olhar dentro dela
-                elif bloco["type"] == "child_page":
-                    # Pega as tabelas encontradas na sub-página e adiciona à nossa lista principal
-                    tabelas_na_subpagina = encontrar_tabelas(bloco["id"])
-                    lista_de_tabelas.extend(tabelas_na_subpagina)
-        except Exception as e:
-            st.warning(f"Não foi possível ler o conteúdo de uma sub-página. Erro: {e}")
-        
-        return lista_de_tabelas
+    if lista_de_tabelas:
+        st.sidebar.header("Módulos de Geração")
+        tabela_selecionada = st.sidebar.selectbox(
+            "Escolha a tabela que deseja preencher:",
+            options=list(lista_de_tabelas.keys())
+        )
 
-    # --- Execução Principal ---
-    # Começa a busca a partir da página principal do projeto
-    todas_as_tabelas = encontrar_tabelas(page_id)
+        # --- Módulo: Gerador de Opções para "Sistemas de Magia" ---
+        if tabela_selecionada == "Sistemas de Magia":
+            st.header("🔮 Gerador de Opções para 'Sistemas de Magia'")
+            st.info("Esta ferramenta usa a IA para sugerir opções para o campo 'Fonte de Poder'.")
 
-    st.success("✅ Busca concluída!")
+            tema = st.text_input("Dê um tema ou conceito para guiar a IA (opcional):", placeholder="Ex: Magia baseada em emoções, tecnologia antiga...")
 
-    st.subheader("Todas as Bases de Dados Encontradas no Projeto:")
+            if st.button("Gerar Sugestões de 'Fonte de Poder'"):
+                with st.spinner("🧠 A IA está pensando..."):
+                    prompt = f"""
+                    Liste 7 fontes de poder criativas e concisas para um sistema de magia de fantasia.
+                    Se um tema for fornecido, baseie as sugestões nesse tema. Tema: '{tema}'.
+                    Retorne apenas a lista, com um item por linha. Não adicione números, marcadores ou texto extra.
+                    """
+                    ai_response = model.generate_content(prompt)
+                    sugestoes = [linha.strip() for linha in ai_response.text.strip().split('\n') if linha.strip()]
+                    # Guarda as sugestões na memória da sessão para não perdê-las
+                    st.session_state['sugestoes_magia'] = sugestoes
 
-    if todas_as_tabelas:
-        for nome_tabela in todas_as_tabelas:
-            st.write(f"- {nome_tabela}")
+            # Se houver sugestões na memória, exibe-as com caixas de seleção
+            if 'sugestoes_magia' in st.session_state:
+                st.write("---")
+                st.subheader("Sugestões Geradas:")
+                selecionadas = []
+                for sugestao in st.session_state['sugestoes_magia']:
+                    if st.checkbox(sugestao, key=sugestao):
+                        selecionadas.append(sugestao)
+
+                st.write("---")
+                if st.button("Salvar Opções Selecionadas no Notion"):
+                    if not selecionadas:
+                        st.warning("Nenhuma opção foi selecionada!")
+                    else:
+                        with st.spinner("🔄 Atualizando sua base de dados no Notion..."):
+                            try:
+                                database_id = lista_de_tabelas[tabela_selecionada]
+                                opcoes_formatadas = [{"name": nome_opcao} for nome_opcao in selecionadas]
+                                notion.databases.update(
+                                    database_id=database_id,
+                                    properties={"Fonte de Poder": {"select": {"options": opcoes_formatadas}}}
+                                )
+                                st.success("✅ Opções salvas com sucesso no Notion!")
+                                # Limpa a memória para a próxima geração
+                                del st.session_state['sugestoes_magia']
+                            except Exception as e:
+                                st.error(f"Erro ao salvar no Notion: {e}")
+        else:
+            st.info(f"O módulo para preencher a tabela '{tabela_selecionada}' ainda não foi construído.")
     else:
-        st.warning("Nenhuma tabela foi encontrada no projeto, nem mesmo em sub-páginas.")
-
-except Exception as e:
-    st.error(f"❌ Ocorreu um erro geral ao conectar com o Notion.")
-    st.error(f"Detalhes do erro: {e}")
-    st.info("Dicas: Verifique se seus segredos (NOTION_TOKEN e PAGE_ID) estão corretos.")
+        st.error("Nenhuma base de dados foi encontrada no seu projeto do Notion.")
