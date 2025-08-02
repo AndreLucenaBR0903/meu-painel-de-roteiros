@@ -53,7 +53,7 @@ if notion and model:
         )
 
         # --- Módulo: Gerador de Opções para "Sistemas de Magia" ---
-        if tabela_selecionada == "Sistemas de Magia":
+        if tabela_selecionada == "SISTEMAS DE MAGIA":
             st.header("🔮 Gerador de Opções para 'Sistemas de Magia'")
             st.info("Esta ferramenta usa a IA para sugerir opções para o campo 'Fonte de Poder'.")
 
