@@ -21,11 +21,7 @@ def buscar_paginas_filhas(_notion_client, page_id):
         return {}
 
 def duplicar_projeto(notion_client, modelo_id, destino_id, novo_nome):
-    """
-    Lê a estrutura de um modelo e a recria em uma nova página de destino.
-    """
     try:
-        # Passo 1: Criar a nova página do projeto
         st.write("1/4 - Criando a nova página do projeto...")
         nova_pagina_projeto = notion_client.pages.create(
             parent={"page_id": destino_id},
@@ -34,22 +30,19 @@ def duplicar_projeto(notion_client, modelo_id, destino_id, novo_nome):
         )
         novo_projeto_id = nova_pagina_projeto["id"]
 
-        # Passo 2: Ler a "planta baixa" do modelo
         st.write("2/4 - Lendo a estrutura do modelo...")
         blocos_modelo = notion_client.blocks.children.list(block_id=modelo_id)["results"]
         tabelas_modelo = [b for b in blocos_modelo if b["type"] == "child_database"]
         
-        id_map = {} # Mapeia IDs antigos para novos IDs
-        schemas_originais = {} # Guarda as propriedades originais
+        id_map = {}
+        schemas_originais = {}
 
-        # Passo 3: Criar as novas tabelas (Primeira Passagem)
         st.write("3/4 - Construindo as novas bases de dados...")
         for tabela_modelo in tabelas_modelo:
             id_antigo = tabela_modelo["id"]
             schema_original = notion_client.databases.retrieve(database_id=id_antigo)
             schemas_originais[id_antigo] = schema_original["properties"]
             
-            # Prepara as propriedades, mas sem as relações por enquanto
             propriedades_sem_relacao = {
                 nome: prop for nome, prop in schema_original["properties"].items() if prop["type"] != "relation"
             }
@@ -60,9 +53,8 @@ def duplicar_projeto(notion_client, modelo_id, destino_id, novo_nome):
                 properties=propriedades_sem_relacao
             )
             id_map[id_antigo] = nova_tabela["id"]
-            time.sleep(0.5) # Pequena pausa para evitar sobrecarregar a API
+            time.sleep(0.5)
 
-        # Passo 4: Recriar os relacionamentos (Segunda Passagem)
         st.write("4/4 - Conectando os relacionamentos entre as tabelas...")
         for id_antigo, id_novo in id_map.items():
             propriedades_originais = schemas_originais[id_antigo]
@@ -73,9 +65,15 @@ def duplicar_projeto(notion_client, modelo_id, destino_id, novo_nome):
                     id_relacao_antiga = prop["relation"]["database_id"]
                     if id_relacao_antiga in id_map:
                         id_relacao_nova = id_map[id_relacao_antiga]
-                        # Adiciona a propriedade de relação para ser atualizada
+                        
+                        # --- A CORREÇÃO ESTÁ AQUI ---
+                        # Agora especificamos que é uma "relação de mão única"
                         propriedades_para_atualizar[nome] = {
-                            "relation": {"database_id": id_relacao_nova}
+                            "relation": {
+                                "database_id": id_relacao_nova,
+                                "type": "single_property",
+                                "single_property": {}
+                            }
                         }
             
             if propriedades_para_atualizar:
