@@ -1,44 +1,103 @@
 import streamlit as st
 from notion_client import Client
+import time
 
 # --- Configuração da Página ---
-st.set_page_config(
-    page_title="Painel de Roteiros",
-    page_icon="🎬",
-    layout="centered"
-)
+st.set_page_config(page_title="Painel de Roteiros", page_icon="🎬", layout="centered")
 
 # --- Funções do Backend ---
 
-# Função para buscar as sub-páginas (nossos modelos ou projetos) dentro de uma página-mãe
-@st.cache_data(ttl=600) # Cache para não sobrecarregar o Notion
+@st.cache_data(ttl=600)
 def buscar_paginas_filhas(_notion_client, page_id):
     try:
         resposta = _notion_client.blocks.children.list(block_id=page_id)
         paginas = {}
         for bloco in resposta["results"]:
             if bloco["type"] == "child_page":
-                # Guarda o nome da página e seu ID
                 paginas[bloco["child_page"]["title"]] = bloco["id"]
         return paginas
     except Exception as e:
         st.error(f"Erro ao buscar páginas: {e}")
         return {}
 
-# --- Gerenciamento de Estado ---
+def duplicar_projeto(notion_client, modelo_id, destino_id, novo_nome):
+    """
+    Lê a estrutura de um modelo e a recria em uma nova página de destino.
+    """
+    try:
+        # Passo 1: Criar a nova página do projeto
+        st.write("1/4 - Criando a nova página do projeto...")
+        nova_pagina_projeto = notion_client.pages.create(
+            parent={"page_id": destino_id},
+            properties={"title": [{"type": "text", "text": {"content": novo_nome}}]},
+            children=[{"object": "block", "type": "heading_2", "heading_2": {"rich_text": [{"type": "text", "text": {"content": "Bases de Dados do Projeto"}}]}}]
+        )
+        novo_projeto_id = nova_pagina_projeto["id"]
+
+        # Passo 2: Ler a "planta baixa" do modelo
+        st.write("2/4 - Lendo a estrutura do modelo...")
+        blocos_modelo = notion_client.blocks.children.list(block_id=modelo_id)["results"]
+        tabelas_modelo = [b for b in blocos_modelo if b["type"] == "child_database"]
+        
+        id_map = {} # Mapeia IDs antigos para novos IDs
+        schemas_originais = {} # Guarda as propriedades originais
+
+        # Passo 3: Criar as novas tabelas (Primeira Passagem)
+        st.write("3/4 - Construindo as novas bases de dados...")
+        for tabela_modelo in tabelas_modelo:
+            id_antigo = tabela_modelo["id"]
+            schema_original = notion_client.databases.retrieve(database_id=id_antigo)
+            schemas_originais[id_antigo] = schema_original["properties"]
+            
+            # Prepara as propriedades, mas sem as relações por enquanto
+            propriedades_sem_relacao = {
+                nome: prop for nome, prop in schema_original["properties"].items() if prop["type"] != "relation"
+            }
+
+            nova_tabela = notion_client.databases.create(
+                parent={"page_id": novo_projeto_id},
+                title=[{"type": "text", "text": {"content": tabela_modelo["child_database"]["title"]}}],
+                properties=propriedades_sem_relacao
+            )
+            id_map[id_antigo] = nova_tabela["id"]
+            time.sleep(0.5) # Pequena pausa para evitar sobrecarregar a API
+
+        # Passo 4: Recriar os relacionamentos (Segunda Passagem)
+        st.write("4/4 - Conectando os relacionamentos entre as tabelas...")
+        for id_antigo, id_novo in id_map.items():
+            propriedades_originais = schemas_originais[id_antigo]
+            propriedades_para_atualizar = {}
+
+            for nome, prop in propriedades_originais.items():
+                if prop["type"] == "relation":
+                    id_relacao_antiga = prop["relation"]["database_id"]
+                    if id_relacao_antiga in id_map:
+                        id_relacao_nova = id_map[id_relacao_antiga]
+                        # Adiciona a propriedade de relação para ser atualizada
+                        propriedades_para_atualizar[nome] = {
+                            "relation": {"database_id": id_relacao_nova}
+                        }
+            
+            if propriedades_para_atualizar:
+                notion_client.databases.update(database_id=id_novo, properties=propriedades_para_atualizar)
+                time.sleep(0.5)
+
+        return nova_pagina_projeto["url"]
+
+    except Exception as e:
+        st.error(f"Ocorreu um erro durante a duplicação: {e}")
+        return None
+
+# --- Gerenciamento de Estado e Interface ---
 if 'app_mode' not in st.session_state:
     st.session_state['app_mode'] = 'Home'
 
-# --- Interface Principal ---
-
-# Tenta conectar ao Notion
 try:
     notion = Client(auth=st.secrets["NOTION_TOKEN"])
 except Exception as e:
-    st.error("Falha ao conectar com o Notion. Verifique seu NOTION_TOKEN nos segredos.")
-    st.stop() # Para a execução se não conseguir conectar
+    st.error("Falha ao conectar com o Notion. Verifique seu NOTION_TOKEN.")
+    st.stop()
 
-# --- Tela de Boas-Vindas ---
 if st.session_state['app_mode'] == 'Home':
     st.title("🎬 Bem-vindo ao seu Painel de Roteiros")
     st.write("---")
@@ -53,22 +112,30 @@ if st.session_state['app_mode'] == 'Home':
             st.session_state['app_mode'] = 'Abrir'
             st.rerun()
 
-# --- Tela de "Criar Novo Projeto" ---
 elif st.session_state['app_mode'] == 'Criar':
     st.header("🚀 Criar um Novo Projeto")
-    
-    # Busca os modelos na página de MOLDES
     moldes_page_id = st.secrets.get("MOLDES_PAGE_ID")
-    if not moldes_page_id:
-        st.error("O ID da página de modelos (MOLDES_PAGE_ID) não foi encontrado nos seus segredos.")
+    projetos_page_id = st.secrets.get("PROJETOS_PAGE_ID")
+
+    if not moldes_page_id or not projetos_page_id:
+        st.error("IDs das páginas de MOLDES ou PROJETOS não encontrados nos segredos.")
     else:
         lista_de_moldes = buscar_paginas_filhas(notion, moldes_page_id)
         if lista_de_moldes:
-            modelo_escolhido = st.selectbox("1. Escolha um modelo:", options=list(lista_de_moldes.keys()))
+            modelo_escolhido_nome = st.selectbox("1. Escolha um modelo:", options=list(lista_de_moldes.keys()))
             nome_novo_projeto = st.text_input("2. Dê um nome para o seu novo projeto:")
             
-            if st.button("Criar Projeto"):
-                st.info(f"Nosso próximo passo será construir a lógica para duplicar o modelo '{modelo_escolhido}' com o nome '{nome_novo_projeto}'.")
+            if st.button("Criar Projeto Agora"):
+                if not nome_novo_projeto.strip():
+                    st.warning("Por favor, insira um nome para o projeto.")
+                else:
+                    with st.spinner("Clonando seu projeto... Este processo pode levar um minuto."):
+                        modelo_id = lista_de_moldes[modelo_escolhido_nome]
+                        url_novo_projeto = duplicar_projeto(notion, modelo_id, projetos_page_id, nome_novo_projeto)
+                    
+                    if url_novo_projeto:
+                        st.success(f"🎉 Projeto '{nome_novo_projeto}' criado com sucesso!")
+                        st.markdown(f"**[Clique aqui para ver seu novo projeto no Notion]({url_novo_projeto})**")
         else:
             st.warning("Nenhum modelo foi encontrado na sua página de 'MOLDES'.")
 
@@ -76,22 +143,17 @@ elif st.session_state['app_mode'] == 'Criar':
         st.session_state['app_mode'] = 'Home'
         st.rerun()
 
-# --- Tela de "Abrir Projeto Existente" ---
 elif st.session_state['app_mode'] == 'Abrir':
     st.header("📂 Abrir um Projeto Existente")
-
-    # Busca os projetos na página de PROJETOS EM ANDAMENTO
     projetos_page_id = st.secrets.get("PROJETOS_PAGE_ID")
     if not projetos_page_id:
-        st.error("O ID da página de projetos (PROJETOS_PAGE_ID) não foi encontrado nos seus segredos.")
+        st.error("O ID da página de projetos não foi encontrado nos segredos.")
     else:
         lista_de_projetos = buscar_paginas_filhas(notion, projetos_page_id)
         if lista_de_projetos:
             projeto_escolhido = st.selectbox("Escolha um projeto para abrir:", options=list(lista_de_projetos.keys()))
-            
             if st.button("Abrir Projeto"):
                 st.success(f"Você abriu o projeto: **{projeto_escolhido}**")
-                st.info("Nosso próximo passo será carregar o painel de controle deste projeto.")
         else:
             st.warning("Nenhum projeto foi encontrado na sua página de 'PROJETOS EM ANDAMENTO'.")
 
